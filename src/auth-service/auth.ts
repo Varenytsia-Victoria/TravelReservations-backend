@@ -1,10 +1,24 @@
-import express, { Request, Response } from 'express'
+import express from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import dotenv from 'dotenv'
-const pool = require('./database') 
-
+import { createClient } from 'redis'
 dotenv.config()
+
+const pool = require('./database')
+const client = createClient({
+	url: 'redis://localhost:6379',
+})
+
+client.connect().catch(err => console.error('Redis connection failed', err))
+
+client.on('error', (err: Error) => {
+	console.error(`Error connecting to Redis: ${err}`)
+})
+
+client.on('connect', () => {
+	console.log('Connected to Redis')
+})
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -12,6 +26,7 @@ const PORT = process.env.PORT || 3000
 app.use(express.json())
 
 interface User {
+	id: number
 	email: string
 	username: string
 	password: string
@@ -39,13 +54,19 @@ app.post('/register', async (req: any, res: any) => {
 			expiresIn: '1h',
 		})
 
-		await pool.query(
-			'INSERT INTO users (email, username, password) VALUES ($1, $2, $3)',
+		// Додавання нового користувача в базу даних
+		const newUser = await pool.query(
+			'INSERT INTO users (email, username, password) VALUES ($1, $2, $3) RETURNING id',
 			[email, username, hashedPassword]
 		)
 
+		const userId = newUser.rows[0].id
+
+		// Збереження токена в Redis
+		await client.set(`auth:${userId}`, token, { EX: 3600 })
+
 		res.status(200).json({ status: true, newUser: { email, username }, token })
-	} catch (err:any) {
+	} catch (err: any) {
 		console.error(err.message)
 		res.status(400).json({ status: false, message: err.message })
 	}
@@ -69,13 +90,12 @@ app.post('/login', async (req: any, res: any) => {
 			registeredUser.rows[0].password
 		)
 		if (isMatch) {
-			const token = jwt.sign(
-				{ id: registeredUser.rows[0]._id },
-				process.env.TOKEN || '',
-				{
-					expiresIn: '1h',
-				}
-			)
+			const userId = registeredUser.rows[0].id
+			const token = jwt.sign({ id: userId }, process.env.TOKEN || '', {
+				expiresIn: '1h',
+			})
+
+			await client.set(`auth:${userId}`, token, { EX: 3600 })
 
 			return res
 				.status(200)
@@ -83,9 +103,25 @@ app.post('/login', async (req: any, res: any) => {
 		} else {
 			return res.status(400).json({ message: 'Incorrect Password' })
 		}
-	} catch (err:any) {
+	} catch (err: any) {
 		console.error(err.message)
 		return res.status(500).json({ message: 'Server Error' })
+	}
+})
+
+app.post('/logout', async (req: express.Request, res: express.Response) => {
+	const { id } = req.body
+
+	try {
+		const result = await client.del(`auth:${id}`)
+		if (result === 1) {
+			res.json({ message: 'Logout successful' })
+		} else {
+			res.status(500).json({ message: 'Logout failed' })
+		}
+	} catch (err: any) {
+		console.error(err.message)
+		res.status(500).json({ message: 'Error logging out' })
 	}
 })
 
