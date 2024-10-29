@@ -5,9 +5,9 @@ import dotenv from 'dotenv'
 import { createClient } from 'redis'
 dotenv.config()
 
-const pool = require('./database')
+const authPool = require('../constants')
 const client = createClient({
-	url: 'redis://localhost:6379',
+	url: process.env.REDIS_URL,
 })
 
 client.connect().catch(err => console.error('Redis connection failed', err))
@@ -20,10 +20,10 @@ client.on('connect', () => {
 	console.log('Connected to Redis')
 })
 
-const app = express()
+const router = express.Router();
 const PORT = process.env.PORT || 3000
 
-app.use(express.json())
+router.use(express.json())
 
 interface User {
 	id: number
@@ -32,14 +32,14 @@ interface User {
 	password: string
 }
 
-app.post('/register', async (req: any, res: any) => {
+router.post('/register', async (req: any, res: any) => {
 	const { email, username, password }: User = req.body
 
 	try {
 		const saltRounds = 10
 		const hashedPassword = await bcrypt.hash(password, saltRounds)
 
-		const userExist = await pool.query(
+		const userExist = await authPool.query(
 			'SELECT * FROM users WHERE username = $1',
 			[username]
 		)
@@ -54,15 +54,13 @@ app.post('/register', async (req: any, res: any) => {
 			expiresIn: '1h',
 		})
 
-		// Додавання нового користувача в базу даних
-		const newUser = await pool.query(
+		const newUser = await authPool.query(
 			'INSERT INTO users (email, username, password) VALUES ($1, $2, $3) RETURNING id',
 			[email, username, hashedPassword]
 		)
 
 		const userId = newUser.rows[0].id
 
-		// Збереження токена в Redis
 		await client.set(`auth:${userId}`, token, { EX: 3600 })
 
 		res.status(200).json({ status: true, newUser: { email, username }, token })
@@ -72,11 +70,11 @@ app.post('/register', async (req: any, res: any) => {
 	}
 })
 
-app.post('/login', async (req: any, res: any) => {
+router.post('/login', async (req: any, res: any) => {
 	const { username, password } = req.body
 
 	try {
-		const registeredUser = await pool.query(
+		const registeredUser = await authPool.query(
 			'SELECT * FROM users WHERE username = $1',
 			[username]
 		)
@@ -109,7 +107,7 @@ app.post('/login', async (req: any, res: any) => {
 	}
 })
 
-app.post('/logout', async (req: express.Request, res: express.Response) => {
+router.post('/logout', async (req: express.Request, res: express.Response) => {
 	const { id } = req.body
 
 	try {
@@ -125,6 +123,4 @@ app.post('/logout', async (req: express.Request, res: express.Response) => {
 	}
 })
 
-app.listen(PORT, () => {
-	console.log(`Server running on port ${PORT}`)
-})
+export default router

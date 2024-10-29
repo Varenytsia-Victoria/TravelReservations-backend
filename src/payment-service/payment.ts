@@ -1,13 +1,29 @@
-import express from 'express';
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const pg = require('pg');
-const redis = require('redis');
+import express from 'express'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
+import dotenv from 'dotenv'
+import { createClient } from 'redis'
+dotenv.config()
 
-const app = express();
+const paymentPool = require('../constants')
+const client = createClient({
+	url: process.env.REDIS_URL,
+})
 
-const PORT = process.env.PORT || 3000;
-app.use(express.json());  
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+client.connect().catch(err => console.error('Redis connection failed', err))
+
+client.on('error', (err: Error) => {
+	console.error(`Error connecting to Redis: ${err}`)
+})
+
+client.on('connect', () => {
+	console.log('Connected to Redis')
+})
+
+const route = express.Router()
+const PORT = process.env.PORT || 3000
+
+route.use(express.json())
+
+
+export default route

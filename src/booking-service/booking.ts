@@ -3,6 +3,8 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import dotenv from 'dotenv'
 import { createClient } from 'redis'
+import AuthRouter from '../auth-service/auth'
+import router from '../auth-service/auth'
 dotenv.config()
 
 const bookPool = require('../constants')
@@ -20,13 +22,32 @@ client.on('connect', () => {
 	console.log('Connected to Redis')
 })
 
-const app = express()
+const route = express.Router()
 const PORT = process.env.PORT || 3000
 
-app.use(express.json())
+route.use(express.json())
+route.use('/login', AuthRouter)
+
+function authToken(req: any, res: any, next: any) {
+	const authHeaders = req.headers['Authorization']
+	const token = authHeaders.split(' ')[1]
+
+	if (!token) {
+		return res.status(401).json({ status: false, message: 'No token provided' })
+	}
+
+	jwt.verify(token, process.env.TOKEN || '', (err: any, user: any) => {
+		if (err) {
+			return res.status(403).json({ message: 'Invalid token' })
+		}
+
+		req.user = user
+		next()
+	})
+}
 
 //-------------------   HOTELS ROUTES ------------------------------
-app.get('/hotels', async (req: any, res: any) => {
+route.get('/hotels', async (req: any, res: any) => {
 	try {
 		const cachedHotels = await client.get('hotels')
 		if (cachedHotels) {
@@ -41,7 +62,7 @@ app.get('/hotels', async (req: any, res: any) => {
 	}
 })
 
-app.get('/hotels/{id}', async (req: any, res: any) => {
+route.get('/hotels/{id}', async (req: any, res: any) => {
 	const { id } = req.params
 	try {
 		const cachedHotel = await client.get('hotel:${id}')
@@ -63,7 +84,7 @@ app.get('/hotels/{id}', async (req: any, res: any) => {
 
 //-------------------   CARS ROUTES ------------------------------
 
-app.get('/cars', async (req: any, res: any) => {
+route.get('/cars', async (req: any, res: any) => {
 	try {
 		const cachedCars = await client.get('cars')
 		if (cachedCars) {
@@ -81,7 +102,7 @@ app.get('/cars', async (req: any, res: any) => {
 	}
 })
 
-app.get('/cars/{id}', async (req: any, res: any) => {
+route.get('/cars/{id}', async (req: any, res: any) => {
 	try {
 		const id = req.params
 		const cachedCar = await client.get(`car:${id}`)
@@ -99,7 +120,7 @@ app.get('/cars/{id}', async (req: any, res: any) => {
 
 //-------------------   FLIGHTS ROUTES ------------------------------
 
-app.get('/flights', async (req: any, res: any) => {
+route.get('/flights', async (req: any, res: any) => {
 	try {
 		const cachedCars = await client.get('cars')
 		if (cachedCars) {
@@ -117,7 +138,7 @@ app.get('/flights', async (req: any, res: any) => {
 	}
 })
 
-app.get('/flights/{id}', async (req: any, res: any) => {
+route.get('/flights/{id}', async (req: any, res: any) => {
 	try {
 		const id = req.params
 		const cachedFlights = await client.get(`flights:${id}`)
@@ -137,7 +158,7 @@ app.get('/flights/{id}', async (req: any, res: any) => {
 
 //-------------------   BOOKING ROUTES ------------------------------
 
-app.get('/bookings', async (req: any, res: any) => {
+route.get('/bookings', authToken, async (req: any, res: any) => {
 	try {
 		const cachedBookings = await client.get('bookings')
 		if (cachedBookings) {
@@ -155,7 +176,7 @@ app.get('/bookings', async (req: any, res: any) => {
 	}
 })
 
-app.get('/bookings/{type}', async (req: any, res: any) => {
+route.get('/bookings/{type}', authToken, async (req: any, res: any) => {
 	try {
 		const type = req.params
 		const cachedBookings = await client.get(`bookings:${type}`)
@@ -171,6 +192,4 @@ app.get('/bookings/{type}', async (req: any, res: any) => {
 	} catch (err: any) {}
 })
 
-app.listen(PORT, () => {
-	console.log(`Server is running on port ${PORT}`)
-})
+export default route
