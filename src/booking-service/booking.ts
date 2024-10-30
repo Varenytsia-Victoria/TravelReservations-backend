@@ -4,192 +4,164 @@ import jwt from 'jsonwebtoken'
 import dotenv from 'dotenv'
 import { createClient } from 'redis'
 import AuthRouter from '../auth-service/auth'
-import router from '../auth-service/auth'
+import { Pool } from 'pg'
+
 dotenv.config()
 
-const bookPool = require('../constants')
-const client = createClient({
-	url: process.env.REDIS_URL,
+const { PORT = 3000, REDIS_URL, TOKEN_SECRET } = process.env
+
+const bookPool = new Pool({
+	connectionString: process.env.DATABASE_URL,
 })
 
-client.connect().catch(err => console.error('Redis connection failed', err))
-
-client.on('error', (err: Error) => {
-	console.error(`Error connecting to Redis: ${err}`)
-})
-
-client.on('connect', () => {
-	console.log('Connected to Redis')
-})
+const client = createClient({ url: REDIS_URL })
+client.connect().catch(err => console.error('Redis connection failed:', err))
+client.on('error', err => console.error('Redis error:', err))
+client.on('connect', () => console.log('Connected to Redis'))
 
 const route = express.Router()
-const PORT = process.env.PORT || 3000
-
 route.use(express.json())
 route.use('/login', AuthRouter)
 
-function authToken(req: any, res: any, next: any) {
-	const authHeaders = req.headers['Authorization']
-	const token = authHeaders.split(' ')[1]
+const sendResponse = (res:any, status:number, message:string, data = null) => {
+	res.status(status).json({ status, message, data })
+}
+
+const authToken = (req:any, res:any, next:any) => {
+	const authHeader = req.headers['authorization']
+	const token = authHeader && authHeader.split(' ')[1]
 
 	if (!token) {
-		return res.status(401).json({ status: false, message: 'No token provided' })
+		return sendResponse(res, 401, 'No token provided')
 	}
 
-	jwt.verify(token, process.env.TOKEN || '', (err: any, user: any) => {
+	jwt.verify(token, TOKEN_SECRET || '', (err:any, user:any) => {
 		if (err) {
-			return res.status(403).json({ message: 'Invalid token' })
+			return sendResponse(res, 403, 'Invalid token')
 		}
-
 		req.user = user
 		next()
 	})
 }
 
-//-------------------   HOTELS ROUTES ------------------------------
-route.get('/hotels', async (req: any, res: any) => {
+const cacheResponse = async (key:any, fetchFunction:any, res:any) => {
 	try {
-		const cachedHotels = await client.get('hotels')
-		if (cachedHotels) {
-			return res.json(JSON.parse(cachedHotels))
+		const cachedData = await client.get(key)
+		if (cachedData) {
+			return sendResponse(res, 200, 'Success', JSON.parse(cachedData))
 		}
-		const result = await bookPool.query('SELECT * FROM hotels')
-		const hotels = result.rows
-		client.setEx('hotels', 600, JSON.stringify(hotels))
-	} catch (err: any) {
+		const data = await fetchFunction()
+		client.setEx(key, 600, JSON.stringify(data))
+		sendResponse(res, 200, 'Success', data)
+	} catch (err) {
 		console.error(err)
-		res.status(500).json({ message: 'Server error' })
+		sendResponse(res, 500, 'Server error')
 	}
+}
+
+
+route.get('/hotels', async (req, res) => {
+	await cacheResponse(
+		'hotels',
+		async () => {
+			const result = await bookPool.query('SELECT * FROM hotels')
+			return result.rows
+		},
+		res
+	)
 })
 
-route.get('/hotels/{id}', async (req: any, res: any) => {
+route.get('/hotels/:id', async (req, res) => {
 	const { id } = req.params
-	try {
-		const cachedHotel = await client.get('hotel:${id}')
-		if (cachedHotel) {
-			return res.json(JSON.parse(cachedHotel))
-		}
-		const result = await bookPool.query('SELECT * FROM hotel WHERE id=$1', [id])
-		const hotel = result.rows[0]
-
-		if (!hotel) {
-			return res.status(404).json({ status: false, message: 'Hotel not found' })
-		}
-
-		client.setEx(`hotels:${id}`, 600, JSON.stringify(hotel))
-	} catch (err: any) {
-		res.status(500).json({ status: false, message: 'Server error' })
-	}
+	await cacheResponse(
+		`hotel:${id}`,
+		async () => {
+			const result = await bookPool.query(
+				'SELECT * FROM hotels WHERE id = $1',
+				[id]
+			)
+			return result.rows[0] || null
+		},
+		res
+	)
 })
 
-//-------------------   CARS ROUTES ------------------------------
-
-route.get('/cars', async (req: any, res: any) => {
-	try {
-		const cachedCars = await client.get('cars')
-		if (cachedCars) {
-			return res.json(JSON.parse(cachedCars))
-		}
-		const result = await bookPool.query('SELECT * FROM cars')
-		const cars = result.rows
-
-		if (!cars) {
-			res.status(404).json({ message: 'No cars found', status: false })
-		}
-		client.setEx('cars', 600, JSON.stringify(cars))
-	} catch (err: any) {
-		res.status(500).json({ message: 'Server error', status: false })
-	}
+route.get('/cars', async (req, res) => {
+	await cacheResponse(
+		'cars',
+		async () => {
+			const result = await bookPool.query('SELECT * FROM cars')
+			return result.rows
+		},
+		res
+	)
 })
 
-route.get('/cars/{id}', async (req: any, res: any) => {
-	try {
-		const id = req.params
-		const cachedCar = await client.get(`car:${id}`)
-		if (cachedCar) {
-			return res.json(JSON.parse(cachedCar))
-		}
-		const result = await bookPool.query('SELECT * FROM car WHERE id=$id', [id])
-		const car = result
-
-		client.setEx(`car:${id}`, 600, JSON.stringify(car))
-	} catch (err: any) {
-		res.status(500).json({ message: 'Server error', status: false })
-	}
+route.get('/cars/:id', async (req, res) => {
+	const { id } = req.params
+	await cacheResponse(
+		`car:${id}`,
+		async () => {
+			const result = await bookPool.query('SELECT * FROM cars WHERE id = $1', [
+				id,
+			])
+			return result.rows[0] || null
+		},
+		res
+	)
 })
 
-//-------------------   FLIGHTS ROUTES ------------------------------
-
-route.get('/flights', async (req: any, res: any) => {
-	try {
-		const cachedCars = await client.get('cars')
-		if (cachedCars) {
-			return res.json(JSON.parse(cachedCars))
-		}
-		const result = await bookPool.query('SELECT * FROM cars')
-		const cars = result.rows
-
-		if (!cars) {
-			res.status(404).json({ message: 'No cars found', status: false })
-		}
-		client.setEx('cars', 600, JSON.stringify(cars))
-	} catch (err: any) {
-		res.status(500).json({ message: 'Server error', status: false })
-	}
+route.get('/flights', async (req, res) => {
+	await cacheResponse(
+		'flights',
+		async () => {
+			const result = await bookPool.query('SELECT * FROM flights')
+			return result.rows
+		},
+		res
+	)
 })
 
-route.get('/flights/{id}', async (req: any, res: any) => {
-	try {
-		const id = req.params
-		const cachedFlights = await client.get(`flights:${id}`)
-		if (cachedFlights) {
-			return res.json(JSON.parse(cachedFlights))
-		}
-		const result = await bookPool.query('SELECT * FROM flights WHERE id=$id', [
-			id,
-		])
-		const flights = result
-
-		client.setEx(`flights:${id}`, 600, JSON.stringify(flights))
-	} catch (err: any) {
-		res.status(500).json({ message: 'Server error', status: false })
-	}
+route.get('/flights/:id', async (req, res) => {
+	const { id } = req.params
+	await cacheResponse(
+		`flight:${id}`,
+		async () => {
+			const result = await bookPool.query(
+				'SELECT * FROM flights WHERE id = $1',
+				[id]
+			)
+			return result.rows[0] || null
+		},
+		res
+	)
 })
 
-//-------------------   BOOKING ROUTES ------------------------------
-
-route.get('/bookings', authToken, async (req: any, res: any) => {
-	try {
-		const cachedBookings = await client.get('bookings')
-		if (cachedBookings) {
-			return res.json(JSON.parse(cachedBookings))
-		}
-		const result = await bookPool.query('SELECT * FROM bookings')
-		const bookings = result.rows
-
-		if (!bookings) {
-			res.status(404).json({ message: 'No bookings found', status: false })
-		}
-		client.setEx('bookings', 600, JSON.stringify(bookings))
-	} catch (err: any) {
-		res.status(500).json({ message: 'Server error', status: false })
-	}
+// Bookings routes
+route.get('/bookings', authToken, async (req, res) => {
+	await cacheResponse(
+		'bookings',
+		async () => {
+			const result = await bookPool.query('SELECT * FROM bookings')
+			return result.rows
+		},
+		res
+	)
 })
 
-route.get('/bookings/{type}', authToken, async (req: any, res: any) => {
-	try {
-		const type = req.params
-		const cachedBookings = await client.get(`bookings:${type}`)
-		if (cachedBookings) {
-			return res.json(JSON.parse(cachedBookings))
-		}
-		const result = await bookPool.query(
-			'SELECT * FROM bookings WHERE type=$1',
-			[type]
-		)
-		const bookings = result.rows
-		client.setEx('bookings', 600, JSON.stringify(bookings))
-	} catch (err: any) {}
+route.get('/bookings/:type', authToken, async (req, res) => {
+	const { type } = req.params
+	await cacheResponse(
+		`bookings:${type}`,
+		async () => {
+			const result = await bookPool.query(
+				'SELECT * FROM bookings WHERE type = $1',
+				[type]
+			)
+			return result.rows
+		},
+		res
+	)
 })
 
 export default route
